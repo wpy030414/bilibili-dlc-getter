@@ -25,9 +25,9 @@ export default function App() {
             fontSize: 14,
             color: 'var(--m3e-on-surface-variant, #49454f)',
           }}>
-            共找到 <strong>{state.images.length}</strong> 张图片
+            共找到 <strong>{state.sections.reduce((n, s) => n + s.images.length, 0)}</strong> 张图片
           </div>
-          <ImageGallery images={state.images} />
+          <ImageGallery sections={state.sections} />
         </>
       )}
     </AppShell>

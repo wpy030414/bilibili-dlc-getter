@@ -21,6 +21,9 @@ const WITCH_ACTIVITY_URL =
 const MUJICA_ACTIVITY_URL =
   'https://www.bilibili.com/blackboard/activity-Mz9T5bO5Q3.html?type=dlc&id=107081&lottery_id=107082';
 
+/** 个性装扮：装扮详情页链接（无 lottery_id，id 即 item_id），走 garb suit detail API */
+const GARB_SUIT_URL = 'https://www.bilibili.com/h5/mall/suit/detail?id=67790';
+
 async function parseActivity(page: Page) {
   await page.goto('/');
   await page.fill('#url-input', ACTIVITY_URL);
@@ -86,7 +89,7 @@ test('解析活动后，全部卡片以全尺寸图正常加载并显示', async
   });
 
   await parseActivity(page);
-  await expect(page.getByText(/卡片列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/卡片（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   const imgs = page.locator('m3e-card img');
   const count = await imgs.count();
@@ -116,7 +119,7 @@ test('解析活动后，全部卡片以全尺寸图正常加载并显示', async
   // 素材适配：卡片美术图 cover 满幅、收集品产品图 contain 不裁切
   await expect(imgs.first()).toHaveCSS('object-fit', 'cover');
   const collectImg = page
-    .locator('section', { hasText: '收集品列表' })
+    .locator('section', { hasText: '收集品' })
     .locator('m3e-card img')
     .first();
   await collectImg.scrollIntoViewIfNeeded();
@@ -155,7 +158,7 @@ test('解析过程中按钮显示环形进度条', async ({ page }) => {
   await page.screenshot({ path: 'e2e-artifacts/loading-state.png' });
 
   // 解析完成后按钮恢复文字
-  await expect(page.getByText(/卡片列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/卡片（\d+）/)).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole('button', { name: '解析' })).toBeVisible();
 });
 
@@ -176,7 +179,7 @@ test('右键菜单不再被拦截（放行浏览器原生菜单）', async ({ pa
 
 test('静态表情包可切割并打包下载 25 张 PNG', async ({ page }) => {
   await parseActivity(page);
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 静态网格 5 行 × 5 列 = 25 张；动态表情包卡片需排除
   const card = page
@@ -222,7 +225,7 @@ test('静态表情包可切割并打包下载 25 张 PNG', async ({ page }) => {
 
 test('动态表情包可切割并打包下载 20 张动画 GIF', async ({ page }) => {
   await parseActivity(page);
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 动态网格 4 行 × 5 列 = 20 张，每张产物必须保持动态
   const card = page.locator('m3e-card').filter({ hasText: '动态表情包' });
@@ -301,7 +304,7 @@ test('紧贴型表情包（行列零间隙）经接缝扫描切割为 25 张 PNG
   await page.goto('/');
   await page.fill('#url-input', GAPLESS_ACTIVITY_URL);
   await page.getByRole('button', { name: '解析' }).click();
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 众声漫游夜·应援主题表情包：1000×1000 实心内容块，5×5 满幅 200px 格子
   const card = page.locator('m3e-card').filter({ hasText: '应援主题表情包' });
@@ -340,7 +343,7 @@ test('粘连型表情包切割为 20 张：相贴贴纸与跨格宽构图均按�
   await page.goto('/');
   await page.fill('#url-input', TOUCHING_ACTIVITY_URL);
   await page.getByRole('button', { name: '解析' }).click();
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 静态表情包：4 行 × 5 格；首行含双人格横构图（语义 2:1），也必须切成单格 1:1
   const card = page
@@ -385,7 +388,7 @@ test('动态表情包（动画道具越界行间）切割为 20 张动画 GIF', 
   await page.goto('/');
   await page.fill('#url-input', TOUCHING_ACTIVITY_URL);
   await page.getByRole('button', { name: '解析' }).click();
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 动画中飞行道具会探出到行间隙（联合 alpha 里形成细碎幻影带），不得把一行错拆成两行
   const card = page.locator('m3e-card').filter({ hasText: '动态表情包' });
@@ -431,7 +434,7 @@ test('行内大面积粘连的动态表情包按分裂帧恢复格线，切割�
   await page.goto('/');
   await page.fill('#url-input', WITCH_ACTIVITY_URL);
   await page.getByRole('button', { name: '解析' }).click();
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 魔女审判：联合 alpha 下行整行粘连（500px 连续带），
   // 但接触随动画时断时连——格线需从各分裂帧的间隙中恢复
@@ -476,7 +479,7 @@ test('竖版动态表情包（3×5 与 5×1）切割为 15 + 5 张统一 GIF', a
   await page.goto('/');
   await page.fill('#url-input', MUJICA_ACTIVITY_URL);
   await page.getByRole('button', { name: '解析' }).click();
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   const cases = [
     { key: 'dyn1', filter: { hasText: '动态表情包', hasNotText: '·' }, count: 15, min: 95, max: 140 },
@@ -526,10 +529,10 @@ test('竖版动态表情包（3×5 与 5×1）切割为 15 + 5 张统一 GIF', a
 
 test('卡片内按钮不撑高卡片（收集品同行等高）', async ({ page }) => {
   await parseActivity(page);
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 收集品区：带按钮卡片（表情/头像）与无按钮卡片（勋章/色纸等）应等高
-  const collectCards = page.locator('section', { hasText: '收集品列表' }).locator('m3e-card');
+  const collectCards = page.locator('section', { hasText: '收集品' }).locator('m3e-card');
   const count = await collectCards.count();
   expect(count).toBeGreaterThan(1);
   await collectCards.first().scrollIntoViewIfNeeded();
@@ -543,7 +546,7 @@ test('卡片内按钮不撑高卡片（收集品同行等高）', async ({ page 
 
 test('头像框可上传图片、合成圆形头像并下载', async ({ page }) => {
   await parseActivity(page);
-  await expect(page.getByText(/收集品列表（\d+）/)).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 生成测试头像（渐变 + 白色中心圆，便于肉眼核验圆形裁剪与合成位置）
   const dataUrl = await page.evaluate(() => {
@@ -582,4 +585,77 @@ test('头像框可上传图片、合成圆形头像并下载', async ({ page }) 
   expect(buf.subarray(1, 4).toString()).toBe('PNG');
   expect(buf.readUInt32BE(16)).toBe(420);
   expect(buf.readUInt32BE(20)).toBe(420);
+});
+
+test('个性装扮链接：按分类分区展示全部图片字段', async ({ page }) => {
+  const hdslbFailures: string[] = [];
+  page.on('response', (r) => {
+    if (r.url().includes('hdslb.com') && !r.ok()) {
+      hdslbFailures.push(`${r.status()} ${r.url()}`);
+    }
+  });
+
+  await page.goto('/');
+  await page.fill('#url-input', GARB_SUIT_URL);
+  await page.getByRole('button', { name: '解析' }).click();
+
+  // 装扮详情应出现「卡片」分区（该装扮含 card / card_bg / emoji_package / skin / space_bg 等）
+  await expect(page.getByText(/卡片（\d+）/)).toBeVisible({ timeout: 30_000 });
+  // 分类分区标题：主题皮肤 / 空间背景 等均应作为独立 section 出现
+  await expect(page.getByText(/主题皮肤（\d+）/)).toBeVisible();
+  await expect(page.getByText(/空间背景（\d+）/)).toBeVisible();
+
+  // 分类顺序：空间背景 → 主题皮肤 → 表情包 → 卡片 → 卡片背景
+  const sectionLabels = await page.locator('section > div > m3e-heading').allInnerTexts();
+  const order = sectionLabels.map((t) => t.replace(/（\d+）/, '').trim());
+  console.log('分区顺序:', order.join(' → '));
+  expect(order).toEqual(['空间背景', '主题皮肤', '表情包', '卡片', '卡片背景']);
+
+  // 表情包应展开全部子表情（该装扮为 1 封面 + 19 子表情 = 20），而非仅封面一张
+  const emojiCount = Number(
+    (sectionLabels.find((t) => t.startsWith('表情包')) ?? '').match(/（(\d+)）/)?.[1] ?? '0',
+  );
+  expect(emojiCount, '表情包应展开子表情').toBeGreaterThan(1);
+  console.log(`表情包图片数量: ${emojiCount}`);
+
+  const imgs = page.locator('m3e-card img');
+  const count = await imgs.count();
+  expect(count, '应有装扮图片渲染').toBeGreaterThan(0);
+  console.log(`个性装扮图片数量: ${count}`);
+
+  // 抽查前若干张：src 指向 hdslb CDN 且为图片扩展名（非 .zip/.mp4/.json/.bin）
+  const sample = Math.min(count, 12);
+  for (let i = 0; i < sample; i++) {
+    const img = imgs.nth(i);
+    await img.scrollIntoViewIfNeeded();
+    const src = await img.getAttribute('src');
+    expect(src, `第 ${i + 1} 张图片应有源链`).toBeTruthy();
+    expect(src, `第 ${i + 1} 张图片应来自 hdslb CDN`).toContain('hdslb.com');
+    expect(src, `第 ${i + 1} 张图片应为图片扩展名`).toMatch(/\.(png|jpe?g|webp|gif|apng)([?#].*)?$/i);
+    await expect
+      .poll(async () => img.evaluate((el) => (el as HTMLImageElement).naturalWidth), {
+        timeout: 30_000,
+        message: `第 ${i + 1} 张图片未成功加载`,
+      })
+      .toBeGreaterThan(0);
+  }
+
+  // 个性装扮产品图统一 contain 完整展示
+  await expect(imgs.first()).toHaveCSS('object-fit', 'contain');
+
+  expect(hdslbFailures, '存在失败的图片请求').toEqual([]);
+  await page.screenshot({ path: 'e2e-artifacts/garb-suit.png', fullPage: true });
+});
+
+test('个性装扮链接：无 lottery_id 不误判为格式错误', async ({ page }) => {
+  await page.goto('/');
+  await page.fill('#url-input', GARB_SUIT_URL);
+  await page.getByRole('button', { name: '解析' }).click();
+
+  // 不应出现「无法从链接中提取」的解析失败文案
+  await expect(page.getByText(/无法从链接中提取/)).toHaveCount(0);
+  // 应进入成功或（若装扮下架）业务空态，而非解析错误
+  await expect(page.getByText(/卡片（\d+）|未找到任何图片数据/).first()).toBeVisible({
+    timeout: 30_000,
+  });
 });

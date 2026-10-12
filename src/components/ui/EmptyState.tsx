@@ -27,7 +27,7 @@ export function EmptyState() {
         maxWidth: 400,
         lineHeight: 1.6,
       }}>
-        在上方粘贴 Bilibili 数字周边活动链接，咱来帮你抓取卡片 &amp; 收集品图片喵～♪
+        在上方粘贴 Bilibili 数字周边活动链接或个性装扮链接，咱来帮你抓取全部图片喵～♪
       </p>
     </div>
   );

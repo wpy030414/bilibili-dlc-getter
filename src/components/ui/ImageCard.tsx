@@ -27,10 +27,9 @@ export function ImageCard({ item, index }: Props) {
     if (el?.complete) setLoaded(true);
   }, []);
 
-  const isCard = item.source === 'card';
-  // 收集品特殊服务：表情（网格拼图切割）、头像（模板嵌入）
-  const isEmojiPack = !isCard && item.name.includes('表情');
-  const isPendant = !isCard && (item.name.includes('头像框') || item.name.includes('头像挂件'));
+  // 特殊服务由数据源显式标记：表情（网格拼图切割）、头像挂件（模板嵌入）
+  const isEmojiPack = item.service === 'emoji';
+  const isPendant = item.service === 'pendant';
 
   const showSnack = (msg: string) => setSnackMsg(msg);
 
@@ -80,7 +79,7 @@ export function ImageCard({ item, index }: Props) {
             <slot name="content"> 的 fallback 中，与 slot="content" 同时使用会导致
             图片内容不渲染（0×0，lazy 加载也永不触发） */}
         {/* 预览使用全尺寸源图；右键放行浏览器原生菜单（可直接另存） */}
-        {/* 卡片美术图满幅 cover；收集品多为产品图，contain 完整展示不裁切 */}
+        {/* 卡片美术图满幅 cover；产品图 contain 完整展示不裁切 */}
         <img
           ref={setImgRef}
           slot="header"
@@ -92,8 +91,8 @@ export function ImageCard({ item, index }: Props) {
           style={{
             width: '100%',
             aspectRatio: '3/4',
-            objectFit: isCard ? 'cover' : 'contain',
-            padding: isCard ? 0 : 12,
+            objectFit: item.fit,
+            padding: item.fit === 'cover' ? 0 : 12,
             display: 'block',
             background: 'var(--m3e-surface-container-highest, #e0e0e0)',
             opacity: loaded ? 1 : 0,
