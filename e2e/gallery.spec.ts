@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import fs from 'node:fs';
 
 const ACTIVITY_URL =
@@ -28,6 +28,22 @@ async function parseActivity(page: Page) {
   await page.goto('/');
   await page.fill('#url-input', ACTIVITY_URL);
   await page.getByRole('button', { name: '解析' }).click();
+}
+
+/**
+ * 切割新流程：点击卡片按钮 → 打开参数 dialog（等待预览画布就绪）→ 点确认 → 下载。
+ * emojiBtn 须为卡内按钮定位器（同页多张表情卡，不能全局按名定位）。
+ * 返回下载事件；调用方负责 saveAs 与后续断言。
+ */
+async function confirmCropDownload(page: Page, emojiBtn: Locator) {
+  await emojiBtn.click();
+  const dialog = page.locator('m3e-dialog[open]');
+  await expect(dialog).toBeVisible();
+  // 预览画布只在图像解析完成后渲染（loading 态无 canvas）
+  await expect(dialog.locator('canvas')).toBeVisible({ timeout: 30_000 });
+  const downloadPromise = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: '确认切割' }).click();
+  return downloadPromise;
 }
 
 /** 解析 GIF 结构：画布尺寸 / 帧数 / 每帧时长（1/100 秒） / 透明标记 */
@@ -186,12 +202,10 @@ test('静态表情包可切割并打包下载 25 张 PNG', async ({ page }) => {
     .locator('m3e-card')
     .filter({ hasText: '表情包' })
     .filter({ hasNotText: '动态' });
-  const emojiBtn = card.getByRole('button', { name: '切割下载表情包' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
   await emojiBtn.scrollIntoViewIfNeeded();
 
-  const downloadPromise = page.waitForEvent('download');
-  await emojiBtn.click();
-  const download = await downloadPromise;
+  const download = await confirmCropDownload(page, emojiBtn);
   expect(download.suggestedFilename()).toContain('表情包');
 
   const zipPath = 'e2e-artifacts/emoji-pack-static.zip';
@@ -223,18 +237,161 @@ test('静态表情包可切割并打包下载 25 张 PNG', async ({ page }) => {
   console.log('静态切片尺寸:', [...sizes].join(','));
 });
 
+test('切割 dialog：红色蒙层预览、取消不下载、微调行数后切出对应格数', async ({ page }) => {
+  await parseActivity(page);
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
+
+  const card = page
+    .locator('m3e-card')
+    .filter({ hasText: '表情包' })
+    .filter({ hasNotText: '动态' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
+  await emojiBtn.scrollIntoViewIfNeeded();
+  await emojiBtn.click();
+
+  const dialog = page.locator('m3e-dialog[open]');
+  await expect(dialog).toBeVisible();
+  const canvas = dialog.locator('canvas');
+  await expect(canvas).toBeVisible({ timeout: 30_000 });
+
+  // 8 个参数输入框：行、列、四边外边距、行、列间距
+  await expect(dialog.locator('input')).toHaveCount(8);
+
+  // 预览已绘制：源图 + 红色蒙层贡献非透明像素，且存在「红显著大于绿」的蒙层像素
+  const stats = await canvas.evaluate((el) => {
+    const c = el as HTMLCanvasElement;
+    const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+    let opaque = 0;
+    let reddish = 0;
+    for (let p = 0; p < d.length; p += 4) {
+      if (d[p + 3] > 0) opaque++;
+      if (d[p + 3] > 0 && d[p] - d[p + 1] > 40) reddish++;
+    }
+    return { opaque, reddish };
+  });
+  expect(stats.opaque, '预览画布不应空白').toBeGreaterThan(0);
+  expect(stats.reddish, '被裁掉区域应有红色蒙层').toBeGreaterThan(0);
+  await page.screenshot({ path: 'e2e-artifacts/crop-dialog.png' });
+
+  // 背景点击 / ESC 均不得关闭（仅「取消」与确认完成可关）
+  await page.mouse.click(8, 8);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+
+  // 取消：dialog 关闭且不触发下载
+  let downloaded = false;
+  page.once('download', () => {
+    downloaded = true;
+  });
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(dialog).not.toBeVisible();
+  await page.waitForTimeout(500);
+  expect(downloaded, '取消不应触发下载').toBe(false);
+
+  // 重新打开（保留微调状态），行数 5 → 6，确认后切出 30 格
+  await emojiBtn.click();
+  await expect(page.locator('m3e-dialog[open]')).toBeVisible();
+  await expect(canvas).toBeVisible();
+  await dialog.locator('input').first().fill('6'); // 第一个字段 = 行数
+
+  // dialog 显示的「格 W×H px」= 真实裁切窗（宽=列格、高=行格，可非方）；
+  // 「（1:1）」标识只在 W===H 时出现，且必须与算出的 W、H 严格一致（不硬写）
+  const infoText = await dialog.locator('.crop-info').innerText();
+  const cellMatch = infoText.match(/格 (\d+)×(\d+) px(（1:1）)?/);
+  expect(cellMatch, `「格」应显示为整数 W×H：${infoText}`).not.toBeNull();
+  const shownW = Number(cellMatch![1]);
+  const shownH = Number(cellMatch![2]);
+  expect(cellMatch![3] === '（1:1）', `「（1:1）」标识应与 W===H 一致：${infoText}`).toBe(
+    shownW === shownH,
+  );
+  // 裁切窗补成 1:1 方形后产物边长 = max(窗宽, 窗高)
+  const productSide = Math.max(shownW, shownH);
+
+  const downloadPromise = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: '确认切割' }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toContain('表情包');
+
+  const zipPath = 'e2e-artifacts/emoji-pack-dialog-tuned.zip';
+  await download.saveAs(zipPath);
+  const JSZip = (await import('jszip')).default;
+  const zip = await JSZip.loadAsync(fs.readFileSync(zipPath));
+  const tunedNames = Object.keys(zip.files);
+  expect(tunedNames, '6 行 × 5 列应切割为 30 张').toHaveLength(30);
+
+  // 产物几何：微调致除不尽时，30 张切片仍为统一整数 1:1 方片，
+  // 且边长 = max(裁切窗宽, 高)（与 dialog 显示的 W×H 同源）
+  const tunedSizes = new Set<string>();
+  for (const n of tunedNames) {
+    const buf = await zip.file(n)!.async('nodebuffer');
+    expect(buf.subarray(1, 4).toString()).toBe('PNG');
+    const w = buf.readUInt32BE(16);
+    const h = buf.readUInt32BE(20);
+    expect(w, `${n} 产物应为 1:1 正方形`).toBe(h);
+    expect(Number.isInteger(w), `${n} 尺寸应为整数`).toBe(true);
+    expect(w, `${n} 产物边长应等于 max(裁切窗宽,高)=${productSide}`).toBe(productSide);
+    tunedSizes.add(`${w}x${h}`);
+  }
+  expect(tunedSizes.size, '微调后切片尺寸应统一').toBe(1);
+  console.log('微调切片尺寸:', [...tunedSizes].join(','));
+
+  // 「（1:1）」标识诚实性：把行数改成明显不等的高度（2），裁切窗变非方，
+  // 标识必须如实取消，且如实显示 W≠H
+  await emojiBtn.click();
+  await expect(page.locator('m3e-dialog[open]')).toBeVisible();
+  await dialog.locator('input').first().fill('2');
+  const info2 = await dialog.locator('.crop-info').innerText();
+  const m2 = info2.match(/格 (\d+)×(\d+) px(（1:1）)?/);
+  expect(m2, `「格」应显示为整数 W×H：${info2}`).not.toBeNull();
+  expect(Number(m2![1]), `行数改 2 后应为非方裁切窗 W≠H：${info2}`).not.toBe(Number(m2![2]));
+  expect(m2![3], '非 1:1 时不得标注「（1:1）」').toBeUndefined();
+  await dialog.getByRole('button', { name: '取消' }).click();
+});
+
+test('贴纸紧贴的满幅表：列间距如实推断为 0，裁切窗为正 1:1（回归 id=112538）', async ({ page }) => {
+  await page.goto('/');
+  await page.fill(
+    '#url-input',
+    'https://www.bilibili.com/blackboard/activity-Mz9T5bO5Q3.html?type=dlc&id=112538&lottery_id=112539',
+  );
+  await page.getByRole('button', { name: '解析' }).click();
+  await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
+
+  const card = page.locator('m3e-card').filter({ hasText: '表情包' }).filter({ hasNotText: '动态' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
+  await emojiBtn.scrollIntoViewIfNeeded();
+  await emojiBtn.click();
+
+  const dialog = page.locator('m3e-dialog[open]');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('canvas')).toBeVisible({ timeout: 30_000 });
+
+  // 人眼应得的干净解：上下边距 56、左右边距 40、列间距 0 → 格 200×200（1:1）。
+  // 此前被「内容带中心差」累积的 ±1px 噪声算成 55/53、38/37 → 201（非方）。
+  const val = (label: string) => dialog.locator(`input[aria-label="${label}"]`).inputValue();
+  expect(await val('行间距'), '行间距应为 56').toBe('56');
+  expect(await val('列间距'), '贴纸紧贴应推断为 0（1px 缝隙是噪声）').toBe('0');
+  expect(await val('上边距'), '上边距应为 56').toBe('56');
+  expect(await val('下边距'), '下边距应为 56').toBe('56');
+  expect(await val('左边距'), '左边距应为 40').toBe('40');
+  expect(await val('右边距'), '右边距应为 40').toBe('40');
+
+  const info = await dialog.locator('.crop-info').innerText();
+  expect(info, '应显示 200×200 正 1:1').toContain('格 200×200 px（1:1）');
+
+  await dialog.getByRole('button', { name: '取消' }).click();
+});
+
 test('动态表情包可切割并打包下载 20 张动画 GIF', async ({ page }) => {
   await parseActivity(page);
   await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
   // 动态网格 4 行 × 5 列 = 20 张，每张产物必须保持动态
   const card = page.locator('m3e-card').filter({ hasText: '动态表情包' });
-  const emojiBtn = card.getByRole('button', { name: '切割下载表情包' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
   await emojiBtn.scrollIntoViewIfNeeded();
 
-  const downloadPromise = page.waitForEvent('download');
-  await emojiBtn.click();
-  const download = await downloadPromise;
+  const download = await confirmCropDownload(page, emojiBtn);
   expect(download.suggestedFilename()).toContain('表情包');
 
   const zipPath = 'e2e-artifacts/emoji-pack-dynamic.zip';
@@ -308,12 +465,10 @@ test('紧贴型表情包（行列零间隙）经接缝扫描切割为 25 张 PNG
 
   // 众声漫游夜·应援主题表情包：1000×1000 实心内容块，5×5 满幅 200px 格子
   const card = page.locator('m3e-card').filter({ hasText: '应援主题表情包' });
-  const emojiBtn = card.getByRole('button', { name: '切割下载表情包' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
   await emojiBtn.scrollIntoViewIfNeeded();
 
-  const downloadPromise = page.waitForEvent('download');
-  await emojiBtn.click();
-  const download = await downloadPromise;
+  const download = await confirmCropDownload(page, emojiBtn);
   expect(download.suggestedFilename()).toContain('表情包');
 
   const zipPath = 'e2e-artifacts/emoji-pack-gapless.zip';
@@ -350,12 +505,10 @@ test('粘连型表情包切割为 20 张：相贴贴纸与跨格宽构图均按�
     .locator('m3e-card')
     .filter({ hasText: '表情包' })
     .filter({ hasNotText: '动态' });
-  const emojiBtn = card.getByRole('button', { name: '切割下载表情包' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
   await emojiBtn.scrollIntoViewIfNeeded();
 
-  const downloadPromise = page.waitForEvent('download');
-  await emojiBtn.click();
-  const download = await downloadPromise;
+  const download = await confirmCropDownload(page, emojiBtn);
   expect(download.suggestedFilename()).toContain('表情包');
 
   const zipPath = 'e2e-artifacts/emoji-pack-touching.zip';
@@ -392,12 +545,10 @@ test('动态表情包（动画道具越界行间）切割为 20 张动画 GIF', 
 
   // 动画中飞行道具会探出到行间隙（联合 alpha 里形成细碎幻影带），不得把一行错拆成两行
   const card = page.locator('m3e-card').filter({ hasText: '动态表情包' });
-  const emojiBtn = card.getByRole('button', { name: '切割下载表情包' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
   await emojiBtn.scrollIntoViewIfNeeded();
 
-  const downloadPromise = page.waitForEvent('download');
-  await emojiBtn.click();
-  const download = await downloadPromise;
+  const download = await confirmCropDownload(page, emojiBtn);
   expect(download.suggestedFilename()).toContain('表情包');
 
   const zipPath = 'e2e-artifacts/emoji-pack-touching-dynamic.zip';
@@ -439,12 +590,10 @@ test('行内大面积粘连的动态表情包按分裂帧恢复格线，切割�
   // 魔女审判：联合 alpha 下行整行粘连（500px 连续带），
   // 但接触随动画时断时连——格线需从各分裂帧的间隙中恢复
   const card = page.locator('m3e-card').filter({ hasText: '动态表情包' });
-  const emojiBtn = card.getByRole('button', { name: '切割下载表情包' });
+  const emojiBtn = card.getByRole('button', { name: '切割表情包' });
   await emojiBtn.scrollIntoViewIfNeeded();
 
-  const downloadPromise = page.waitForEvent('download');
-  await emojiBtn.click();
-  const download = await downloadPromise;
+  const download = await confirmCropDownload(page, emojiBtn);
   expect(download.suggestedFilename()).toContain('表情包');
 
   const zipPath = 'e2e-artifacts/emoji-pack-witch-dynamic.zip';
@@ -488,12 +637,10 @@ test('竖版动态表情包（3×5 与 5×1）切割为 15 + 5 张统一 GIF', a
 
   for (const c of cases) {
     const card = page.locator('m3e-card').filter(c.filter);
-    const emojiBtn = card.getByRole('button', { name: '切割下载表情包' });
+    const emojiBtn = card.getByRole('button', { name: '切割表情包' });
     await emojiBtn.scrollIntoViewIfNeeded();
 
-    const downloadPromise = page.waitForEvent('download');
-    await emojiBtn.click();
-    const download = await downloadPromise;
+    const download = await confirmCropDownload(page, emojiBtn);
     expect(download.suggestedFilename()).toContain('表情包');
 
     const zipPath = `e2e-artifacts/emoji-pack-mujica-${c.key}.zip`;
@@ -544,7 +691,7 @@ test('卡片内按钮不撑高卡片（收集品同行等高）', async ({ page 
   expect(diff, `收集品卡片高度应一致（含带按钮卡片）：${heights.join(',')}`).toBeLessThanOrEqual(1);
 });
 
-test('头像框可上传图片、合成圆形头像并下载', async ({ page }) => {
+test('头像框：上传图片后弹合成 dialog，预览可调半径，确认后按半径下载', async ({ page }) => {
   await parseActivity(page);
   await expect(page.getByText(/收集品（\d+）/)).toBeVisible({ timeout: 30_000 });
 
@@ -572,19 +719,70 @@ test('头像框可上传图片、合成圆形头像并下载', async ({ page }) 
   const fileInput = page.locator('input[type=file]');
   await expect(fileInput).toHaveCount(1);
 
-  const downloadPromise = page.waitForEvent('download');
+  // 选文件 → 弹出合成 dialog（不是直接下载）
   await fileInput.setInputFiles(testImgPath);
-  const download = await downloadPromise;
-  expect(download.suggestedFilename()).toContain('头像');
+  const dialog = page.locator('m3e-dialog[open]');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('canvas')).toBeVisible({ timeout: 30_000 }); // 预览就绪
 
-  const outPath = 'e2e-artifacts/embedded-avatar.png';
-  await download.saveAs(outPath);
+  // 半径默认值来自模板圆孔自动推断（正数），且 dialog 如实回报模板尺寸
+  const radiusInput = dialog.locator('input[aria-label="头像半径"]');
+  await expect(radiusInput).toBeVisible();
+  const defaultRadius = Number(await radiusInput.inputValue());
+  expect(defaultRadius, '头像半径应自动推断为正整数').toBeGreaterThan(1);
+  await expect(dialog.locator('.crop-info')).toContainText(`头像半径 ${defaultRadius} px`);
+  await expect(dialog.locator('.crop-info')).toContainText('模板 420×420 px');
+  await page.screenshot({ path: 'e2e-artifacts/avatar-dialog.png' });
 
-  // 输出应为模板尺寸（420x420）的 PNG
-  const buf = fs.readFileSync(outPath);
-  expect(buf.subarray(1, 4).toString()).toBe('PNG');
-  expect(buf.readUInt32BE(16)).toBe(420);
-  expect(buf.readUInt32BE(20)).toBe(420);
+  // 背景点击 / ESC 均不得关闭（仅「取消」与确认完成可关）
+  await page.mouse.click(8, 8);
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeVisible();
+
+  // 按默认半径确认：产物为模板尺寸（420×420）的 PNG
+  const downloadA = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: '确认合成' }).click();
+  const dlA = await downloadA;
+  expect(dlA.suggestedFilename()).toContain('头像');
+  const outA = 'e2e-artifacts/embedded-avatar.png';
+  await dlA.saveAs(outA);
+  const bufA = fs.readFileSync(outA);
+  expect(bufA.subarray(1, 4).toString()).toBe('PNG');
+  expect(bufA.readUInt32BE(16)).toBe(420);
+  expect(bufA.readUInt32BE(20)).toBe(420);
+
+  // 重新选取同一文件 → dialog 再次打开；把半径改小后确认，
+  // 产物像素必须随之改变（半径确实作用到合成结果，而非写死）
+  await fileInput.setInputFiles(testImgPath);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('canvas')).toBeVisible({ timeout: 30_000 });
+  const smaller = Math.max(1, defaultRadius - 60);
+  await radiusInput.fill(String(smaller));
+  await expect(dialog.locator('.crop-info')).toContainText(`头像半径 ${smaller} px`);
+  await page.waitForTimeout(400); // 等 dialog 开启动画落定再截图
+  await page.screenshot({ path: 'e2e-artifacts/avatar-dialog-narrow.png' });
+
+  const downloadB = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: '确认合成' }).click();
+  const dlB = await downloadB;
+  const outB = 'e2e-artifacts/embedded-avatar-narrow.png';
+  await dlB.saveAs(outB);
+  const bufB = fs.readFileSync(outB);
+  expect(bufB.readUInt32BE(16)).toBe(420);
+  expect(bufB.readUInt32BE(20)).toBe(420);
+  expect(bufB.equals(bufA), '改小半径后的产物应与默认半径不同（半径确有生效）').toBe(false);
+
+  // 取消：dialog 关闭且不触发下载
+  await fileInput.setInputFiles(testImgPath);
+  await expect(dialog).toBeVisible();
+  let downloaded = false;
+  page.once('download', () => {
+    downloaded = true;
+  });
+  await dialog.getByRole('button', { name: '取消' }).click();
+  await expect(dialog).not.toBeVisible();
+  await page.waitForTimeout(500);
+  expect(downloaded, '取消不应触发下载').toBe(false);
 });
 
 test('个性装扮链接：按分类分区展示全部图片字段', async ({ page }) => {

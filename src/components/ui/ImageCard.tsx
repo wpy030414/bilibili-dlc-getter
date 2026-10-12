@@ -1,10 +1,10 @@
 import { useRef, useState, useCallback } from 'react';
 import type { GalleryImage } from '../../types';
-import { downloadEmojiPack, downloadEmbeddedAvatar } from '../../lib/imageProcessing';
+import { EmojiCropDialog } from './EmojiCropDialog';
+import { AvatarEmbedDialog } from './AvatarEmbedDialog';
 import { M3eCard } from '@m3e/react/card';
 import { M3eIcon } from '@m3e/react/icon';
 import { M3eIconButton } from '@m3e/react/icon-button';
-import { M3eCircularProgressIndicator } from '@m3e/react/progress-indicator';
 import { M3eSnackbar } from '../../lib/m3eSnackbar';
 
 interface Props {
@@ -12,15 +12,18 @@ interface Props {
   index: number;
 }
 
-const SPINNER_STYLE = {
-  '--m3e-circular-flat-progress-indicator-diameter': '20px',
-} as React.CSSProperties;
-
 export function ImageCard({ item, index }: Props) {
   const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [snackMsg, setSnackMsg] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // 切割 dialog：open 控制显隐；openedOnce 让 dialog 首开后保持挂载，
+  // 重开时保留用户的参数微调（迭代式调整的工作流）
+  const [cropOpen, setCropOpen] = useState(false);
+  const [cropOpenedOnce, setCropOpenedOnce] = useState(false);
+  // 头像合成 dialog：选文件后才打开；同样保持挂载以保留半径微调
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [avatarOpenedOnce, setAvatarOpenedOnce] = useState(false);
 
   /** 图片若在挂载前已完成（缓存命中），onLoad 不会再触发，需补一次检查 */
   const setImgRef = useCallback((el: HTMLImageElement | null) => {
@@ -33,41 +36,20 @@ export function ImageCard({ item, index }: Props) {
 
   const showSnack = (msg: string) => setSnackMsg(msg);
 
-  const handleSliceEmoji = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const { total, animated } = await downloadEmojiPack(item.img, item.name);
-      showSnack(
-        animated > 0
-          ? `已切割下载 ${total} 张表情（含 ${animated} 张动图）喵～`
-          : `已切割下载 ${total} 张表情喵～`,
-      );
-    } catch (err) {
-      showSnack(err instanceof Error ? err.message : '表情包切割失败喵……');
-    } finally {
-      setBusy(false);
-    }
+  const openCropDialog = () => {
+    setCropOpenedOnce(true);
+    setCropOpen(true);
   };
 
-  const handleFileChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 选好本地头像后进入合成 dialog：预览效果 + 确定半径（px），确认才下载
+  const handleFileChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file || busy) return;
-    setBusy(true);
-    try {
-      await downloadEmbeddedAvatar(item.img, file, item.name);
-      showSnack('头像已合成下载喵～');
-    } catch (err) {
-      showSnack(err instanceof Error ? err.message : '头像合成失败喵……');
-    } finally {
-      setBusy(false);
-    }
+    if (!file) return;
+    setAvatarFile(file);
+    setAvatarOpenedOnce(true);
+    setAvatarOpen(true);
   };
-
-  const spinner = (
-    <M3eCircularProgressIndicator indeterminate variant="flat" style={SPINNER_STYLE} />
-  );
 
   return (
     <div
@@ -94,7 +76,7 @@ export function ImageCard({ item, index }: Props) {
             objectFit: item.fit,
             padding: item.fit === 'cover' ? 0 : 12,
             display: 'block',
-            background: 'var(--m3e-surface-container-highest, #e0e0e0)',
+            background: 'var(--md-sys-color-surface-container-highest, #e0e0e0)',
             opacity: loaded ? 1 : 0,
             transition: 'opacity 0.3s ease',
           }}
@@ -119,21 +101,19 @@ export function ImageCard({ item, index }: Props) {
             {isEmojiPack && (
               <M3eIconButton
                 size="extra-small"
-                aria-label="切割下载表情包"
-                disabled={busy}
-                onClick={handleSliceEmoji}
+                aria-label="切割表情包"
+                onClick={openCropDialog}
               >
-                {busy ? spinner : <M3eIcon name="content_cut" />}
+                <M3eIcon name="content_cut" />
               </M3eIconButton>
             )}
             {isPendant && (
               <M3eIconButton
                 size="extra-small"
                 aria-label="嵌入头像"
-                disabled={busy}
                 onClick={() => fileInputRef.current?.click()}
               >
-                {busy ? spinner : <M3eIcon name="join_inner" />}
+                <M3eIcon name="join_inner" />
               </M3eIconButton>
             )}
           </div>
@@ -147,6 +127,27 @@ export function ImageCard({ item, index }: Props) {
           accept="image/*"
           style={{ display: 'none' }}
           onChange={handleFileChosen}
+        />
+      )}
+
+      {isEmojiPack && cropOpenedOnce && (
+        <EmojiCropDialog
+          open={cropOpen}
+          url={item.img}
+          name={item.name}
+          onClose={() => setCropOpen(false)}
+          onResult={showSnack}
+        />
+      )}
+
+      {isPendant && avatarOpenedOnce && avatarFile && (
+        <AvatarEmbedDialog
+          open={avatarOpen}
+          url={item.img}
+          file={avatarFile}
+          name={item.name}
+          onClose={() => setAvatarOpen(false)}
+          onResult={showSnack}
         />
       )}
 

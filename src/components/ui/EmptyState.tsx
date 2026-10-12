@@ -16,14 +16,14 @@ export function EmptyState() {
       <M3eIcon
         name="image_search"
         opticalSize={48}
-        style={{ fontSize: 64, color: 'var(--m3e-outline)' } as React.CSSProperties}
+        style={{ fontSize: 64, color: 'var(--md-sys-color-outline, #79747e)' } as React.CSSProperties}
       />
       <h2 style={{ fontSize: 22, fontWeight: 400, lineHeight: 1.3 }}>
         还没有图片
       </h2>
       <p style={{
         fontSize: 14,
-        color: 'var(--m3e-on-surface-variant)',
+        color: 'var(--md-sys-color-on-surface-variant)',
         maxWidth: 400,
         lineHeight: 1.6,
       }}>

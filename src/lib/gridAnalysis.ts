@@ -1,17 +1,20 @@
 /**
- * 表情包网格分析：从像素实时推断网格结构，输出统一尺寸的每格裁切窗口。
+ * 表情包网格分析：从像素推断「均匀网格参数」（行/列数、四边外边距、行/列间距），
+ * 作为切割 dialog 的初始值，由用户在预览中微调后执行参数化裁切。
  * 纯计算模块（无 DOM 依赖），供 imageProcessing 调用，也可在 Node 中直接测试。
  *
- * 网格裁切不允许窗口相交：全部切片同尺寸 1:1、各自容纳本格内容、
- * 相邻窗口零交集（内容范围与格距冲突时，窗口取「区间链」解出的最大
- * 可行尺寸并滑入邻格空白，而非把邻格内容带进来）。
- *
- * 算法分层：
- * - 常规层：行轴按 alpha 内容带分段（幻影带并回邻居）；列数由全部帧、
+ * 推断分层：
+ * - 常规层：行轴按（联合）alpha 内容带分段（幻影带并回邻居）；列数由全部帧、
  *   全部行的「内容间隙中点」拟合周期判定——动画里贴纸接触时断时连，
  *   联合 alpha 上整行粘连的图能在分裂帧里恢复格线。
  * - 兜底层：内容满幅且完全无间隙（紧贴型网格）时没有内容边界可依，
  *   用接缝颜色剖面数出行列数。
+ * - 对齐策略：格线吸附内容带中心 lattice / 间隙中点 lattice（首格起算，
+ *   无累积漂移）；间距自最小内容间隙起、以内容覆盖修正收尾——
+ *   窗口宁可多带空白，也不切进贴纸。
+ * - 几何：裁切窗按各轴自然格（同轴统一整数、无逐格抖动、不强制补方）；
+ *   两轴恰相等时即严格 1:1——是否 1:1 由 dialog 据 gridCellRects 的 w、h
+ *   实时判定后，才决定是否标注「（1:1）」。
  */
 
 export const ALPHA_THRESHOLD = 10;
@@ -74,38 +77,22 @@ export function projectAlpha(
   return proj;
 }
 
-/** 区域内 alpha 内容的包围盒 */
-export function alphaBox(
-  alpha: Uint8ClampedArray,
-  width: number,
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-): CellBox | null {
-  let minX = x1;
-  let minY = y1;
-  let maxX = -1;
-  let maxY = -1;
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      if (alpha[y * width + x] > ALPHA_THRESHOLD) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-  return maxX < 0 ? null : { minX, minY, maxX, maxY };
-}
-
 /* ---------------- 通用小工具 ---------------- */
 
 function lowerMedian(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[(sorted.length - 1) >> 1];
+}
+
+/**
+ * 格间距去噪：1px 视为像素噪声、归 0。相邻贴纸各自的抗锯齿边缘相接时，
+ * 逐像素投影上会偶现 1px 透明缝（贴纸实际紧贴、格间距为 0）；这些排版里
+ * 真实格间距要么 0、要么 ≥3px，不存在真正的 1px 缝隙。若把噪声当格间距，
+ * 列格会被压小 1px（与行格不等），窗口随之变非方。
+ */
+function snapGap(gap: number): number {
+  return gap <= 1 ? 0 : gap;
 }
 
 /**
@@ -343,196 +330,279 @@ export function seamCuts(
   return bestCuts.length > 2 ? bestCuts : [lo, hi + 1];
 }
 
-/** 单轴某槽位的内容范围（含首末） */
-type Extent = [number, number];
+/* ---------------- 参数化网格：推断与几何 ---------------- */
 
-/**
- * 区间链可行性：窗口同宽 S、各自容纳自身内容 [a,b]、且相邻窗口零交集。
- * 从左贪心取最早可行起点 w_k = max(b_k − S + 1, w_{k−1} + S)，
- * 全部 w_k ≤ a_k 即有严格不重叠的窗口序列（窗口允许越出画布，越界为透明补边）。
- */
-function chainFeasible(extents: Extent[], S: number): boolean {
-  let prev = -Infinity;
-  for (const [a, b] of extents) {
-    const w = prev === -Infinity ? b - S + 1 : Math.max(b - S + 1, prev + S);
-    if (w > a) return false;
-    prev = w;
-  }
-  return true;
+/** 用户可微调的均匀网格参数（长度全部为 px） */
+export interface GridParams {
+  /** 行数 / 列数 */
+  rows: number;
+  cols: number;
+  /** 上下左右外边距 */
+  marginTop: number;
+  marginBottom: number;
+  marginLeft: number;
+  marginRight: number;
+  /** 行间距 / 列间距 */
+  rowGap: number;
+  colGap: number;
+}
+
+/** 单轴均匀网格拟合：自 lead 起排 count 格、格间距 gap、尾侧余量 trail */
+interface AxisFit {
+  count: number;
+  lead: number;
+  trail: number;
+  gap: number;
 }
 
 /**
- * 各窗口起点（前提：chainFeasible 通过）：先贪心求最早可行序列，
- * 再在不破坏链（不超过下一窗口最早起点、且容纳自身内容）的余量内让内容居中。
+ * 由内容带拟合单轴（格线吸附带中心 lattice），间距与起点由 finishAxis 落定。
  */
-function chainStarts(extents: Extent[], S: number): number[] {
-  const greedy: number[] = [];
-  let prev = -Infinity;
-  for (const [, b] of extents) {
-    const w = prev === -Infinity ? b - S + 1 : Math.max(b - S + 1, prev + S);
-    greedy.push(w);
-    prev = w;
+function fitBands(bands: Band[], extent: number): AxisFit {
+  const n = bands.length;
+  if (n === 0) return { count: 1, lead: 0, trail: 0, gap: 0 };
+  const contentStart = bands[0][0];
+  const contentEnd = bands[n - 1][1];
+  if (n === 1) return { count: 1, lead: contentStart, trail: extent - 1 - contentEnd, gap: 0 };
+
+  let minGap = Infinity;
+  for (let i = 0; i + 1 < n; i++) {
+    minGap = Math.min(minGap, bands[i + 1][0] - bands[i][1] - 1);
   }
-  return extents.map(([a, b], k) => {
-    const lo = greedy[k];
-    const hi = Math.min(a, k + 1 < extents.length ? greedy[k + 1] - S : Infinity);
-    const center = Math.round((a + b) / 2 - S / 2);
-    return Math.min(Math.max(center, lo), Math.max(lo, hi));
-  });
+  const gap = snapGap(Math.round(minGap));
+  const centers = bands.map(([a, b]) => (a + b) / 2);
+  const pitchInt = Math.max(1, Math.round((centers[n - 1] - centers[0]) / (n - 1)));
+  return finishAxis(n, pitchInt, gap, contentStart, contentEnd, extent, centers[0]);
 }
 
 /**
- * 列数判定：汇集全部帧、全部行的「内容间隙中点」拟合统一格子取周期。
- * - 间隙必须逐帧采集：动画里贴纸的接触时断时连，联合 alpha 上整行粘连
- *   的图往往能在分裂帧里恢复出全部格线（魔女审判型）；
- * - 中点不足（全程全粘连）时退回 1 列，由 1:1 槽位输出整块。
+ * 列轴拟合：多行图的整幅列投影常粘连，列数与格线由「内容间隙中点」
+ * 拟合的周期 lattice 判定（接触时断时连的动画靠分裂帧恢复格线），
+ * 首格中心吸附到内容左侧最近一条格线 + 半格距。无格线佐证时退回整幅列带直接拟合。
  */
-function detectColCount(
-  primary: Uint8ClampedArray,
+function fitColumns(
   alphas: Uint8ClampedArray[],
   W: number,
   rowBands: Band[],
-  spanX: number,
-): number {
+  colBands: Band[],
+): AxisFit {
+  const contentStart = colBands[0][0];
+  const contentEnd = colBands[colBands.length - 1][1];
+  const spanX = contentEnd - contentStart + 1;
+
+  // 逐帧逐行采集「内容间隙中点与间隙宽」
   const midpoints: number[] = [];
+  const gaps: number[] = [];
   for (const m of alphas) {
     for (const [y0, y1] of rowBands) {
       const bands = mergePhantoms(contentBands(projectAlpha(m, W, 0, y0, W - 1, y1, 'col')));
       for (let i = 0; i + 1 < bands.length; i++) {
         const gap = bands[i + 1][0] - bands[i][1] - 1;
-        if (gap >= 1) midpoints.push(bands[i][1] + 1 + Math.floor(gap / 2));
+        midpoints.push(bands[i][1] + 1 + Math.floor(gap / 2));
+        gaps.push(gap);
       }
     }
   }
-  if (midpoints.length < 2) return 1;
+
   const lo = Math.round((W - spanX) / 2);
-  const lattice = estimateLattice(midpoints, lo, lo + spanX - 1);
-  if (!lattice) return 1;
-  return Math.min(12, Math.max(1, Math.round(spanX / lattice.pitch)));
+  const lattice = midpoints.length >= 2 ? estimateLattice(midpoints, lo, lo + spanX - 1) : null;
+  if (!lattice) return fitBands(colBands, W);
+
+  const count = Math.min(12, Math.max(1, Math.round(spanX / lattice.pitch)));
+  if (count <= 1) return { count: 1, lead: contentStart, trail: W - 1 - contentEnd, gap: 0 };
+
+  const minGap = gaps.length ? Math.max(0, Math.min(...gaps)) : 0;
+  const pitchInt = Math.max(1, Math.round(lattice.pitch));
+  // 格线相位（绝对坐标）：midpoints 对周期取模的相位即格线位置，再偏移半格距
+  // 得到「首格中心」相位——注意不能用画布居中假设的 lo 作相位基准，
+  // 否则格线整体平移、首窗被钳到 0、余量全堆到右侧
+  const slotPhase = lattice.offset + pitchInt / 2;
+  const k = Math.round((contentStart - slotPhase) / pitchInt);
+  return finishAxis(count, pitchInt, snapGap(Math.round(minGap)), contentStart, contentEnd, W, slotPhase + k * pitchInt);
 }
 
-/**
- * 列轴每槽的内容范围：以暂定格距（跨度/列数）把内容带归槽。
- * 带集合要逐帧采集：动画里贴纸的接触时断时连，联合 alpha 上整行粘连的
- * 图必须靠分裂帧恢复各槽的真实内容范围；粘连多格的合并带只贡献首槽
- * 左缘与末槽右缘，中段留给完整的分裂带佐证，避免虚增中间槽的内容范围。
- */
-function columnExtents(
-  alphas: Uint8ClampedArray[],
-  W: number,
-  rowBands: Band[],
-  colN: number,
-  xLo: number,
-  spanX: number,
-): Extent[] {
-  const pitch = spanX / colN;
-  const ext: Array<Extent | null> = new Array(colN).fill(null);
-  const add = (k: number, a: number, b: number) => {
-    const e = ext[k];
-    ext[k] = e ? [Math.min(e[0], a), Math.max(e[1], b)] : [a, b];
+/** 满幅紧贴网格：接缝切割位置 → 均匀参数（无间隙） */
+function fitFromCuts(cuts: number[], extent: number): AxisFit {
+  if (cuts.length < 3) return { count: 1, lead: 0, trail: 0, gap: 0 };
+  return {
+    count: cuts.length - 1,
+    lead: Math.max(0, cuts[0]),
+    trail: Math.max(0, extent - cuts[cuts.length - 1]),
+    gap: 0,
   };
-  const slotOf = (x: number) => Math.min(colN - 1, Math.max(0, Math.floor((x - xLo) / pitch)));
-  for (const m of alphas) {
-    for (const [y0, y1] of rowBands) {
-      const bands = mergePhantoms(contentBands(projectAlpha(m, W, 0, y0, W - 1, y1, 'col')));
-      for (const [a, b] of bands) {
-        const k0 = slotOf(a);
-        const k1 = slotOf(b);
-        if (k0 === k1) {
-          add(k0, a, b);
-        } else {
-          add(k0, a, a);
-          add(k1, b, b);
-        }
-      }
-    }
-  }
-  return ext.map((e, k) => {
-    if (e) return e;
-    const c = Math.round(xLo + (k + 0.5) * pitch);
-    return [c, c];
-  });
 }
 
-/* ---------------- 主入口 ---------------- */
+/**
+ * 轴拟合收尾：由格距 pitch、期望间距、内容范围与首格中心落定均匀参数。
+ * - 间距下限：n × pitch − gap ≤ extent（尾边距不透支）；
+ * - 间距上限：最小内容间隙（窗口宁可多带空白，也不切进贴纸）；
+ * - 覆盖修正：末窗右缘够不到内容末端时，逐 px 把间距让给格子（每让 1px
+ *   末缘推进 n px）——最小间隙估值偏大时不至于切掉末列内容；
+ * - 首格起点：以首格中心对齐（无累积漂移），且不超过内容起点。
+ */
+function finishAxis(
+  n: number,
+  pitchInt: number,
+  gapPreferred: number,
+  contentStart: number,
+  contentEnd: number,
+  extent: number,
+  anchorCenter: number,
+): AxisFit {
+  const gapFloor = Math.max(0, n * pitchInt - extent);
+  const gapCeil = Math.min(Math.max(0, gapPreferred), pitchInt - 1);
+  let gap = Math.max(gapFloor, gapCeil);
+  let cell = pitchInt - gap;
+  // 先钳到 [0, contentStart]：锚点在内容左侧远处时 lead 可能为负，
+  // 不钳位会让覆盖修正把间距整段磨光
+  let lead = Math.max(0, Math.min(Math.round(anchorCenter - cell / 2), contentStart));
+
+  const span = () => n * cell + (n - 1) * gap;
+  while (lead + span() < contentEnd + 1 && gap > gapFloor) {
+    gap--;
+    cell = pitchInt - gap;
+  }
+  // 精确化落点：格尺寸与首格起点改由内容跨度锚定——网格恰好包住内容（外圈格
+  // 外缘 = 内容外缘），且用「覆盖修正后的最终间距」而非最小内容间隙。这样格尺寸
+  // 不再受各格贴纸在格内的高低偏移/漏空累积出的 ±1~3px 噪声影响（内容跨度 968、
+  // 间距 56 必得 200，而非被顶成 201；边距也回到 56/40 而非 55/53、38/37）。
+  const cellExact = Math.max(1, Math.round((contentEnd - contentStart + 1 - (n - 1) * gap) / n));
+  let cellFit = cellExact;
+  let spanExact = n * cellFit + (n - 1) * gap;
+  while (spanExact > extent && cellFit > 1) {
+    cellFit--;
+    spanExact -= n;
+  }
+  const leadExact = Math.max(0, Math.min(contentStart, extent - spanExact));
+  return { count: n, lead: leadExact, trail: extent - leadExact - spanExact, gap };
+}
 
 /**
- * 表情包网格分析（不假设任何固定行列数）。
- * 大图必然是一个均匀网格，网格裁切不允许窗口相交，因此输出满足：
- * 全部切片同尺寸 1:1、各自容纳本格内容、相邻窗口零交集（如格距不够
- * 大于内容时窗口会适度小于格距、滑入邻格空白区）。
- * - 每槽内容范围：行轴取内容带；列轴逐帧统计间隙中点定列数后归槽
- *   （接触时断时连的动画在分裂帧里恢复格线；粘连合并带只贡献两缘）；
- * - 格尺寸 S 由「区间链」定出：S ≥ 各槽内容尺寸，且逐槽贪心排布
- *   w_k = max(b_k − S + 1, w_{k−1} + S) 不得越过下一槽内容起始；
- *   取最大可行 S，再在链内余量中让内容居中；
- * - 紧贴型满幅网格没有内容边界，用接缝颜色剖面数行列后同样成链；
- * - 窗口内全无内容（占位槽）不产出；内容原位置保留，不缩放。
+ * 网格参数推断（不假设任何固定行列数），为切割 dialog 提供初始值：
+ * - 行轴由（联合）alpha 行内容带拟合，列轴由间隙中点 lattice 拟合；
+ * - 紧贴型满幅网格（行列均无间隙）退回接缝颜色剖面数行列；
+ * - 推断只求「接近」，精确对齐交给用户在预览中微调。
  */
-export function analyzeGrid({ rgba, alphas, W, H }: GridInput): CellBox[] {
+export function inferGridParams({ rgba, alphas, W, H }: GridInput): GridParams {
   const primary = alphas[0];
+  const rowBands = mergePhantoms(contentBands(projectAlpha(primary, W, 0, 0, W - 1, H - 1, 'row')));
+  const colBands = mergePhantoms(contentBands(projectAlpha(primary, W, 0, 0, W - 1, H - 1, 'col')));
 
-  const rowProj = projectAlpha(primary, W, 0, 0, W - 1, H - 1, 'row');
-  const rowBands = mergePhantoms(contentBands(rowProj));
-  if (rowBands.length === 0) return [];
-
-  const globalColBands = contentBands(projectAlpha(primary, W, 0, 0, W - 1, H - 1, 'col'));
-  const spanX = globalColBands.length
-    ? globalColBands[globalColBands.length - 1][1] - globalColBands[0][0] + 1
-    : W;
-  const spanY = rowBands[rowBands.length - 1][1] - rowBands[0][0] + 1;
-
-  // 行列数判定与「每槽内容范围」
-  let xExt: Extent[];
-  let yExt: Extent[];
-  if (rowBands.length === 1 && globalColBands.length <= 1 && spanX / W >= 0.6 && spanY / H >= 0.6) {
-    // 紧贴型满幅网格：无内容边界可依，接缝颜色剖面数出行列数，
-    // 切口之间即各槽内容范围
-    const rowCuts = seamCuts(rgba, primary, W, H, 'row');
-    const colCuts = seamCuts(rgba, primary, W, H, 'col');
-    if (rowCuts.length < 3 || colCuts.length < 3) return [];
-    xExt = colCuts.slice(0, -1).map((c, i) => [c, colCuts[i + 1] - 1]);
-    yExt = rowCuts.slice(0, -1).map((c, i) => [c, rowCuts[i + 1] - 1]);
+  let x: AxisFit;
+  let y: AxisFit;
+  if (rowBands.length === 0 || colBands.length === 0) {
+    x = { count: 1, lead: 0, trail: 0, gap: 0 };
+    y = { count: 1, lead: 0, trail: 0, gap: 0 };
   } else {
-    const colN = detectColCount(primary, alphas, W, rowBands, spanX);
-    if (colN < 1) return [];
-    yExt = rowBands.map(([a, b]) => [a, b]);
-    xExt = columnExtents(alphas, W, rowBands, colN, globalColBands[0][0], spanX);
-  }
-
-  // 格尺寸 S：全部窗口同宽。区间链给出「零交集」的可行区间——
-  // 下界为各槽内容尺寸（窗口必须容纳内容），上界受隔槽边界约束。
-  // 取最小可行值：切片紧贴本格内容，不留多余透明边。
-  const minS = Math.max(
-    xExt.reduce((m, [a, b]) => Math.max(m, b - a + 1), 0),
-    yExt.reduce((m, [a, b]) => Math.max(m, b - a + 1), 0),
-  );
-  let S = minS;
-  for (let s = minS; s <= Math.max(W, H, minS); s++) {
-    if (chainFeasible(xExt, s) && chainFeasible(yExt, s)) {
-      S = s;
-      break;
+    const spanX = colBands[colBands.length - 1][1] - colBands[0][0] + 1;
+    const spanY = rowBands[rowBands.length - 1][1] - rowBands[0][0] + 1;
+    if (rowBands.length === 1 && colBands.length <= 1 && spanX / W >= 0.6 && spanY / H >= 0.6) {
+      y = fitFromCuts(seamCuts(rgba, primary, W, H, 'row'), H);
+      x = fitFromCuts(seamCuts(rgba, primary, W, H, 'col'), W);
+    } else {
+      y = fitBands(rowBands, H);
+      x = fitColumns(alphas, W, rowBands, colBands);
     }
   }
+  return {
+    rows: y.count,
+    cols: x.count,
+    marginTop: y.lead,
+    marginBottom: y.trail,
+    marginLeft: x.lead,
+    marginRight: x.trail,
+    rowGap: y.gap,
+    colGap: x.gap,
+  };
+}
 
-  const xStarts = chainStarts(xExt, S);
-  const yStarts = chainStarts(yExt, S);
+/** 参数有效性：全部非负整数、行列 ≥ 1、每格至少 1px */
+export function gridParamsValid(p: GridParams, W: number, H: number): boolean {
+  const values = [
+    p.rows,
+    p.cols,
+    p.marginTop,
+    p.marginBottom,
+    p.marginLeft,
+    p.marginRight,
+    p.rowGap,
+    p.colGap,
+  ];
+  if (values.some((v) => !Number.isInteger(v) || v < 0)) return false;
+  if (p.rows < 1 || p.cols < 1) return false;
+  const innerW = W - p.marginLeft - p.marginRight - (p.cols - 1) * p.colGap;
+  const innerH = H - p.marginTop - p.marginBottom - (p.rows - 1) * p.rowGap;
+  return innerW >= p.cols && innerH >= p.rows;
+}
 
-  const cells: CellBox[] = [];
-  for (let ri = 0; ri < yExt.length; ri++) {
-    const minY = yStarts[ri];
-    const sy0 = Math.max(0, minY);
-    const sy1 = Math.min(H - 1, minY + S - 1);
-    if (sy0 > sy1) continue;
-    for (let ci = 0; ci < xExt.length; ci++) {
-      const minX = xStarts[ci];
-      const sx0 = Math.max(0, minX);
-      const sx1 = Math.min(W - 1, minX + S - 1);
-      if (sx0 > sx1) continue;
-      // 空槽（占位槽）跳过：窗口内全帧无内容则不产出
-      if (!alphaBox(primary, W, sx0, sy0, sx1, sy1)) continue;
-      cells.push({ minX, minY, maxX: minX + S - 1, maxY: minY + S - 1 });
+/**
+ * 单轴自然格尺寸：ceil(内宽 / 格数)——宁可多吃边距空白也不切进贴纸（与
+ * finishAxis 的覆盖修正同一原则，且 ceil ≥ 理想浮点值，覆盖只多不少）；
+ * 再收缩到「n 格 + (n−1) 间隙」放得下 [lead, extent] 为止（满幅 trail=0 时的
+ * 画布越界保护）。恒为整数 ≥ 1；整除不尽的余量留在末格右侧。
+ */
+function axisCellSize(
+  lead: number,
+  trail: number,
+  gap: number,
+  n: number,
+  extent: number,
+): number {
+  const inner = extent - lead - trail - (n - 1) * gap;
+  let cell = Math.max(1, Math.ceil(inner / n));
+  const maxSpan = extent - lead;
+  while (cell > 1 && n * cell + (n - 1) * gap > maxSpan) cell--;
+  return cell;
+}
+
+/** 单轴每格起点：格距 = 自然格尺寸 + 间隙，自 lead 起（起点间距 ≠ 格宽，差一个 gap） */
+function axisStarts(lead: number, gap: number, n: number, cell: number): number[] {
+  const pitch = cell + gap;
+  const starts: number[] = [];
+  for (let k = 0; k < n; k++) starts.push(lead + k * pitch);
+  return starts;
+}
+
+/** 参数化格子矩形 */
+export interface CellRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * 由网格参数计算全部格子矩形（预览与切割共用的唯一几何来源）。
+ * 裁切窗按**各轴自然格尺寸**：宽 = 列格、高 = 行格，同轴内统一整数、无逐格
+ * 抖动；两轴恰好相等时裁切窗即严格 1:1 正方形——是否 1:1 由调用方（dialog）
+ * 用本函数算出的 w、h 据实判定，这里不做任何强制补方。
+ */
+export function gridCellRects(p: GridParams, W: number, H: number): CellRect[] {
+  if (!gridParamsValid(p, W, H)) return [];
+  const w = axisCellSize(p.marginLeft, p.marginRight, p.colGap, p.cols, W);
+  const h = axisCellSize(p.marginTop, p.marginBottom, p.rowGap, p.rows, H);
+  const xStarts = axisStarts(p.marginLeft, p.colGap, p.cols, w);
+  const yStarts = axisStarts(p.marginTop, p.rowGap, p.rows, h);
+  const rects: CellRect[] = [];
+  for (let r = 0; r < p.rows; r++) {
+    for (let c = 0; c < p.cols; c++) {
+      rects.push({ x: xStarts[c], y: yStarts[r], w, h });
     }
   }
-  return cells;
+  return rects;
+}
+
+/**
+ * 均匀网格的裁切窗尺寸（dialog「格」展示用）：宽 w = 列格、高 h = 行格。
+ * 是否严格 1:1（w === h）由调用方据实判定后决定要不要标注——这里只如实返回
+ * 算出来的 w、h，绝不替调用方硬写「1:1」。参数非法时返回 null。
+ */
+export function gridCellSize(
+  p: GridParams,
+  W: number,
+  H: number,
+): { w: number; h: number } | null {
+  const rects = gridCellRects(p, W, H);
+  if (rects.length === 0) return null;
+  return { w: rects[0].w, h: rects[0].h };
 }

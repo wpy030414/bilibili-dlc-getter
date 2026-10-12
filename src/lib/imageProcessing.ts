@@ -1,8 +1,8 @@
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
-import { analyzeGrid } from './gridAnalysis';
-import type { CellBox } from './gridAnalysis';
+import { gridCellRects } from './gridAnalysis';
+import type { CellBox, GridParams } from './gridAnalysis';
 
 /** GIF 1-bit 透明的二值化阈值：低于该 alpha 视为全透明 */
 const GIF_ALPHA_CUTOFF = 128;
@@ -217,8 +217,38 @@ function imageDataEqual(a: ImageData, b: ImageData): boolean {
 
 /* ---------------- 切割主流程 ---------------- */
 
-/** 静态图切割：PNG 输出 */
-async function sliceStillPack(bytes: Uint8Array, mime: string): Promise<Blob[]> {
+/** 解析完成的表情大图：静态为整图 canvas，动图为全部已合成帧 */
+export interface EmojiSheet {
+  W: number;
+  H: number;
+  /** 首帧（静态图即整图）RGBA 像素，供网格参数推断 */
+  rgba0: Uint8ClampedArray;
+  /** 第 0 张为主 alpha（静态图 alpha / 动图全帧联合 alpha），动图时其后为各帧 */
+  alphas: Uint8ClampedArray[];
+  /** 静态路径：切片绘制源；动图为 null */
+  stillCanvas: HTMLCanvasElement | null;
+  /** 动图路径；静态为 null */
+  anim: AnimatedFrames | null;
+}
+
+/**
+ * 抓取并解码表情大图：动图（GIF / 动画 WebP / APNG）解出全部已合成帧，
+ * 并合成全帧联合 alpha（动画动作可能超出单帧的静止范围）。
+ */
+export async function loadEmojiSheet(url: string): Promise<EmojiSheet> {
+  const { bytes, mime } = await fetchImageBytes(url);
+  const anim = await decodeAnimatedFrames(bytes, mime);
+  if (anim) {
+    const { width: W, height: H } = anim;
+    const union = new Uint8ClampedArray(W * H);
+    for (const alpha of anim.alphas) {
+      for (let p = 0; p < union.length; p++) {
+        if (alpha[p] > union[p]) union[p] = alpha[p];
+      }
+    }
+    return { W, H, rgba0: anim.rgba0, alphas: [union, ...anim.alphas], stillCanvas: null, anim };
+  }
+
   const bitmap = await createImageBitmap(new Blob([bytes], { type: mime })).catch(() => null);
   if (!bitmap) throw new Error('图片解码失败，无法切割');
   const canvas = document.createElement('canvas');
@@ -227,32 +257,26 @@ async function sliceStillPack(bytes: Uint8Array, mime: string): Promise<Blob[]> 
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
-
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const boxes = analyzeGrid({
-    rgba: imageData.data,
-    alphas: [alphaChannelOf(imageData)],
+  return {
     W: canvas.width,
     H: canvas.height,
-  });
+    rgba0: imageData.data,
+    alphas: [alphaChannelOf(imageData)],
+    stillCanvas: canvas,
+    anim: null,
+  };
+}
+
+/** 静态图切割：按格子裁出 1:1 方形 PNG */
+async function sliceStillPack(source: HTMLCanvasElement, boxes: CellBox[]): Promise<Blob[]> {
   const blobs: Blob[] = [];
-  for (const box of boxes) blobs.push(await cropSquareToBlob(canvas, box));
+  for (const box of boxes) blobs.push(await cropSquareToBlob(source, box));
   return blobs;
 }
 
 /** 动图切割：格子逐帧重编码，动的格子输出动画 GIF，静止的格子输出 PNG */
-async function sliceAnimatedPack(anim: AnimatedFrames): Promise<Blob[]> {
-  const { width: W, height: H } = anim;
-
-  // 全帧联合 alpha：动画动作可能超出单帧的静止范围，用联合范围做网格与裁剪基准
-  const union = new Uint8ClampedArray(W * H);
-  for (const alpha of anim.alphas) {
-    for (let p = 0; p < union.length; p++) {
-      if (alpha[p] > union[p]) union[p] = alpha[p];
-    }
-  }
-
-  const boxes = analyzeGrid({ rgba: anim.rgba0, alphas: [union, ...anim.alphas], W, H });
+async function sliceAnimatedPack(anim: AnimatedFrames, boxes: CellBox[]): Promise<Blob[]> {
   const blobs: Blob[] = [];
   for (const box of boxes) {
     const { w, h, s, ox, oy } = squareGeometry(box);
@@ -297,34 +321,41 @@ async function sliceAnimatedPack(anim: AnimatedFrames): Promise<Blob[]> {
 }
 
 /**
- * 表情包切割：这类图由多行多列网格拼成。
- * 行列数与行列间距全部从像素实时分析（见 analyzeGrid），不写死网格尺寸；
- * 紧贴型网格（行列均无间隙）由接缝颜色剖面还原网格。
- * 动图（GIF / 动画 WebP / APNG）逐帧切割：动的格子产出动画 GIF，静止格子产出 PNG。
+ * 按网格参数切割表情大图（几何见 gridCellRects）：
+ * 格子补成 1:1 方形（透明填充、内容居中）；动图逐格重编码，
+ * 动的格子产出动画 GIF，静止格子产出 PNG。
  */
-export async function sliceEmojiPack(url: string): Promise<Blob[]> {
-  const { bytes, mime } = await fetchImageBytes(url);
-  const anim = await decodeAnimatedFrames(bytes, mime);
-  if (anim) return sliceAnimatedPack(anim);
-  return sliceStillPack(bytes, mime);
+export async function sliceEmojiSheet(sheet: EmojiSheet, params: GridParams): Promise<Blob[]> {
+  const boxes = gridCellRects(params, sheet.W, sheet.H).map<CellBox>((r) => ({
+    minX: r.x,
+    minY: r.y,
+    maxX: r.x + r.w - 1,
+    maxY: r.y + r.h - 1,
+  }));
+  if (sheet.anim) return sliceAnimatedPack(sheet.anim, boxes);
+  if (!sheet.stillCanvas) throw new Error('表情图尚未解码完成');
+  return sliceStillPack(sheet.stillCanvas, boxes);
 }
 
 /* ---------------- 头像挂件嵌入 ---------------- */
 
+/** 解析完成的头像挂件模板：原图 + 尺寸 + 自动推断的圆孔半径 */
+export interface PendantTemplate {
+  /** 模板原图（环形装饰，中心为透明圆孔），合成时叠加在最上层 */
+  image: HTMLImageElement;
+  W: number;
+  H: number;
+  /** 从圆心向四向扫描推断的头像半径（px），作为 dialog 的初始值 */
+  radius: number;
+}
+
 /**
- * 头像挂件嵌入：模板为「中心透明圆孔 + 环形装饰」。
- * 解析模式：从圆心向四个方向扫描首个不透明像素得到各向内圆距离，
- * 取次大值为头像半径（与主体装饰留出安全距离，允许凸出装饰自然叠压）。
- * 用户图按 cover 缩放并圆形裁剪，居中嵌入圆孔，最后叠加模板输出。
+ * 从圆心向四个方向扫描首个不透明像素得到各向内圆距离，取次大值为头像半径：
+ * 与主体装饰留出安全距离，允许凸出装饰自然叠压。
  */
-export async function embedAvatarInPendant(pendantUrl: string, userFile: File): Promise<Blob> {
-  const template = await loadImage(pendantUrl);
-  const userImg = await loadImageFromFile(userFile);
-  const src = toCanvasData(template);
-  const { data, width: W, height: H } = src;
+function detectAvatarRadius(data: Uint8ClampedArray, W: number, H: number): number {
   const cx = Math.floor(W / 2);
   const cy = Math.floor(H / 2);
-
   const scan = (dx: number, dy: number): number => {
     let x = cx;
     let y = cy;
@@ -338,7 +369,43 @@ export async function embedAvatarInPendant(pendantUrl: string, userFile: File): 
     return Math.min(W, H);
   };
   const distances = [scan(-1, 0), scan(1, 0), scan(0, -1), scan(0, 1)].sort((a, b) => b - a);
-  const radius = distances[1] ?? Math.min(W, H) / 4;
+  return distances[1] ?? Math.floor(Math.min(W, H) / 4);
+}
+
+/** 头像半径钳制范围：至少 1px，至多不超模板短边半幅（圆心居中，圆不出画布） */
+export function clampAvatarRadius(radius: number, W: number, H: number): number {
+  const r = Math.floor(radius);
+  if (!Number.isFinite(r)) return 1;
+  return Math.min(Math.max(r, 1), Math.max(1, Math.floor(Math.min(W, H) / 2)));
+}
+
+/** 加载头像挂件模板：解码原图并推断圆孔半径（供 dialog 预览与合成共用） */
+export async function loadPendantTemplate(pendantUrl: string): Promise<PendantTemplate> {
+  const image = await loadImage(pendantUrl);
+  const W = image.naturalWidth;
+  const H = image.naturalHeight;
+  const { data } = toCanvasData(image);
+  const radius = clampAvatarRadius(detectAvatarRadius(data, W, H), W, H);
+  return { image, W, H, radius };
+}
+
+/** 加载用户所选头像图（File → HTMLImageElement） */
+export function loadUserImage(file: File): Promise<HTMLImageElement> {
+  return loadImageFromFile(file);
+}
+
+/**
+ * 合成头像：用户图按 cover 缩放并圆形裁剪（半径 radius，圆心即模板中心），
+ * 再叠加模板（中心透明圆孔透出头像）。返回模板尺寸的画布。
+ */
+export function composeEmbeddedAvatar(
+  template: PendantTemplate,
+  userImg: HTMLImageElement,
+  radius: number,
+): HTMLCanvasElement {
+  const { W, H, image } = template;
+  const cx = Math.floor(W / 2);
+  const cy = Math.floor(H / 2);
   const d = radius * 2;
 
   const canvas = document.createElement('canvas');
@@ -358,9 +425,9 @@ export async function embedAvatarInPendant(pendantUrl: string, userFile: File): 
   ctx.restore();
 
   // 叠加模板（中心透明区透出头像）
-  ctx.drawImage(template, 0, 0);
+  ctx.drawImage(image, 0, 0);
 
-  return canvasToBlob(canvas, 'image/png');
+  return canvas;
 }
 
 /* ---------------- 下载入口 ---------------- */
@@ -370,9 +437,13 @@ export interface EmojiPackResult {
   animated: number;
 }
 
-/** 表情包切割并打包 ZIP 下载，返回小图数量与其中动图数量 */
-export async function downloadEmojiPack(url: string, name: string): Promise<EmojiPackResult> {
-  const blobs = await sliceEmojiPack(url);
+/** 按参数切割表情包并打包 ZIP 下载，返回小图数量与其中动图数量 */
+export async function downloadEmojiPack(
+  sheet: EmojiSheet,
+  params: GridParams,
+  name: string,
+): Promise<EmojiPackResult> {
+  const blobs = await sliceEmojiSheet(sheet, params);
   const zip = new JSZip();
   let animated = 0;
   blobs.forEach((blob, i) => {
@@ -385,12 +456,18 @@ export async function downloadEmojiPack(url: string, name: string): Promise<Emoj
   return { total: blobs.length, animated };
 }
 
-/** 合成头像并下载 */
+/** 合成头像并下载：半径由用户在 dialog 中确定（px） */
 export async function downloadEmbeddedAvatar(
-  pendantUrl: string,
-  userFile: File,
+  template: PendantTemplate,
+  userImg: HTMLImageElement,
+  radius: number,
   name: string,
 ): Promise<void> {
-  const blob = await embedAvatarInPendant(pendantUrl, userFile);
+  const canvas = composeEmbeddedAvatar(
+    template,
+    userImg,
+    clampAvatarRadius(radius, template.W, template.H),
+  );
+  const blob = await canvasToBlob(canvas, 'image/png');
   saveAs(blob, `${name}-头像.png`);
 }

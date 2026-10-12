@@ -22,12 +22,12 @@ export function ErrorState({ message, onRetry }: Props) {
       <M3eIcon
         name="error_outline"
         opticalSize={48}
-        style={{ fontSize: 64, color: 'var(--m3e-error)' } as React.CSSProperties}
+        style={{ fontSize: 64, color: 'var(--md-sys-color-error)' } as React.CSSProperties}
       />
       <h2 style={{ fontSize: 20, fontWeight: 500 }}>出错了喵……</h2>
       <p style={{
         fontSize: 14,
-        color: 'var(--m3e-on-surface-variant)',
+        color: 'var(--md-sys-color-on-surface-variant)',
         maxWidth: 480,
         lineHeight: 1.6,
         wordBreak: 'break-word',

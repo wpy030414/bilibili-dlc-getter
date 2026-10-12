@@ -31,9 +31,9 @@ export function LoadingSkeleton() {
           <div
             key={i}
             style={{
-              borderRadius: 'var(--m3e-card-shape, 12px)',
+              borderRadius: 'var(--md-sys-shape-corner-medium, 12px)',
               overflow: 'hidden',
-              background: 'var(--m3e-surface-container)',
+              background: 'var(--md-sys-color-surface-container)',
             }}
           >
             <SkeletonBlock width="100%" aspectRatio="3/4" />

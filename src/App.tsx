@@ -23,7 +23,7 @@ export default function App() {
           <div style={{
             marginBottom: 16,
             fontSize: 14,
-            color: 'var(--m3e-on-surface-variant, #49454f)',
+            color: 'var(--md-sys-color-on-surface-variant, #49454f)',
           }}>
             共找到 <strong>{state.sections.reduce((n, s) => n + s.images.length, 0)}</strong> 张图片
           </div>
