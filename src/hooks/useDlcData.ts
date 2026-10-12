@@ -1,6 +1,6 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import type { FetchState, ParsedUrl } from '../types';
-import { parseUrl } from '../lib/parseUrl';
+import { parseUrl, paramsToPath, paramsFromPathname } from '../lib/parseUrl';
 import { fetchDlcData } from '../lib/fetchDlcData';
 import { fetchGarbSuit } from '../lib/fetchGarbSuit';
 
@@ -23,11 +23,11 @@ export function useDlcData() {
   const run = useCallback(async (params: ParsedUrl) => {
     setState({ status: 'loading' });
     try {
-      const sections = await fetchSections(params);
+      const { title, sections } = await fetchSections(params);
       if (sections.length === 0) {
         setState({ status: 'error', message: EMPTY_MESSAGES[params.kind] });
       } else {
-        setState({ status: 'success', sections });
+        setState({ status: 'success', title, sections });
       }
     } catch (err) {
       setState({
@@ -48,6 +48,8 @@ export function useDlcData() {
         return;
       }
       lastParams.current = params;
+      // 标准化 RESTful 路径写入地址栏（不触发页面刷新）
+      history.pushState(null, '', paramsToPath(params));
       void run(params);
     },
     [run],
@@ -55,6 +57,32 @@ export function useDlcData() {
 
   const retry = useCallback(() => {
     if (lastParams.current) void run(lastParams.current);
+  }, [run]);
+
+  // 页面入口：首次从地址栏回读标准化参数（若存在且尚未提交，则自动发起）
+  useEffect(() => {
+    const params = paramsFromPathname();
+    if (params) {
+      lastParams.current = params;
+      void run(params);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot on mount
+  }, []);
+
+  // 浏览器前进/后退：响应地址栏变化，重新触发解析或重置为空闲态
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = paramsFromPathname();
+      if (params) {
+        lastParams.current = params;
+        void run(params);
+      } else {
+        lastParams.current = null;
+        setState({ status: 'idle' });
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, [run]);
 
   return { state, submit, retry };

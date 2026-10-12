@@ -14,6 +14,7 @@ interface Props {
 
 export function ImageCard({ item, index }: Props) {
   const [loaded, setLoaded] = useState(false);
+  const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null);
   const [snackMsg, setSnackMsg] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   // 切割 dialog：open 控制显隐；openedOnce 让 dialog 首开后保持挂载，
@@ -27,7 +28,13 @@ export function ImageCard({ item, index }: Props) {
 
   /** 图片若在挂载前已完成（缓存命中），onLoad 不会再触发，需补一次检查 */
   const setImgRef = useCallback((el: HTMLImageElement | null) => {
-    if (el?.complete) setLoaded(true);
+    if (!el) return;
+    if (el.complete) {
+      setLoaded(true);
+      if (el.naturalWidth && el.naturalHeight) {
+        setDimensions({ w: el.naturalWidth, h: el.naturalHeight });
+      }
+    }
   }, []);
 
   // 特殊服务由数据源显式标记：表情（网格拼图切割）、头像挂件（模板嵌入）
@@ -68,7 +75,13 @@ export function ImageCard({ item, index }: Props) {
           src={item.img}
           alt={item.name}
           loading="lazy"
-          onLoad={() => setLoaded(true)}
+          onLoad={(e) => {
+            setLoaded(true);
+            const img = e.currentTarget;
+            if (img.naturalWidth && img.naturalHeight) {
+              setDimensions({ w: img.naturalWidth, h: img.naturalHeight });
+            }
+          }}
           onError={() => setLoaded(true)}
           style={{
             width: '100%',
@@ -81,22 +94,46 @@ export function ImageCard({ item, index }: Props) {
             transition: 'opacity 0.3s ease',
           }}
         />
-        <div slot="content" style={{ paddingTop: 12 }}>
-          {/* 行高锁定为文字行高，图标按钮（较小档位）不撑高卡片 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, height: 22 }}>
-            <div
-              style={{
-                flex: 1,
-                minWidth: 0,
-                fontSize: 14,
-                fontWeight: 500,
-                lineHeight: 1.3,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {item.name}
+        <div slot="content" style={{ paddingTop: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div
+                style={{
+                  fontSize: 14,
+                  fontWeight: 500,
+                  lineHeight: 1.3,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {item.name}
+              </div>
+              {dimensions && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 1.4,
+                    color: 'var(--md-sys-color-outline, #79747e)',
+                    marginTop: 2,
+                  }}
+                >
+                  {dimensions.w}&thinsp;×&thinsp;{dimensions.h}
+                </div>
+              )}
+              {!dimensions && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 1.4,
+                    marginTop: 2,
+                    visibility: 'hidden',
+                  }}
+                  aria-hidden
+                >
+                  0 × 0
+                </div>
+              )}
             </div>
             {isEmojiPack && (
               <M3eIconButton

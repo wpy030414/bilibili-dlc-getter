@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { AppShell } from './components/layout/AppShell';
 import { UrlInput } from './components/ui/UrlInput';
 import { ImageGallery } from './components/ui/ImageGallery';
@@ -8,6 +9,14 @@ import { useDlcData } from './hooks/useDlcData';
 
 export default function App() {
   const { state, submit, retry } = useDlcData();
+
+  useEffect(() => {
+    if (state.status === 'success') {
+      document.title = `${state.title} - Bilibili DLC Getter`;
+    } else {
+      document.title = 'Bilibili DLC Getter';
+    }
+  }, [state]);
 
   const isLoading = state.status === 'loading';
 

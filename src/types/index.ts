@@ -28,6 +28,8 @@ export interface DlcApiResponse {
   code: number;
   message: string;
   data: {
+    /** 活动名称（用作页面标题） */
+    name?: string;
     card_list?: Array<{
       card_name: string;
       card_img: string;
@@ -53,6 +55,8 @@ export interface GarbSuitResponse {
   code: number;
   message: string;
   data: {
+    /** 装扮名称（用作页面标题） */
+    name?: string;
     /** 分类名 → 条目数组；可能为 null（装扮下架 / 无内容） */
     suit_items?: Record<string, GarbSuitItem[] | null> | null;
   } | null;
@@ -62,5 +66,5 @@ export interface GarbSuitResponse {
 export type FetchState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'success'; sections: GallerySection[] }
+  | { status: 'success'; title: string; sections: GallerySection[] }
   | { status: 'error'; message: string };

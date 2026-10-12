@@ -7,8 +7,8 @@ function collectService(name: string): GalleryImage['service'] {
   return undefined;
 }
 
-/** 通过 CORS 代理请求 B 站 DLC 数字周边 API，返回分区图片列表 */
-export async function fetchDlcData(id: string, lottery_id: string): Promise<GallerySection[]> {
+/** 通过 CORS 代理请求 B 站 DLC 数字周边 API，返回活动标题与分区图片列表 */
+export async function fetchDlcData(id: string, lottery_id: string): Promise<{ title: string; sections: GallerySection[] }> {
   const apiUrl = `https://api.bilibili.com/x/vas/dlc_act/lottery/home_detail/v2?act_id=${id}&lottery_id=${lottery_id}`;
   const proxyUrl = `https://p.xrl.im/?url=${encodeURIComponent(apiUrl)}`;
 
@@ -41,8 +41,9 @@ export async function fetchDlcData(id: string, lottery_id: string): Promise<Gall
     }
   }
 
+  const title = json.data.name || `DLC 活动 (${id})`;
   const sections: GallerySection[] = [];
   if (cards.length) sections.push({ key: 'card', label: '卡片', images: cards, downloadable: true });
   if (collects.length) sections.push({ key: 'collect', label: '收集品', images: collects, downloadable: true });
-  return sections;
+  return { title, sections };
 }

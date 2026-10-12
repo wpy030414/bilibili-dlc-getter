@@ -4,13 +4,13 @@ import type { GalleryImage, GallerySection, GarbSuitItem, GarbSuitResponse } fro
 const CATEGORY_LABELS: Array<[key: string, label: string]> = [
   ['space_bg', '空间背景'],
   ['skin', '主题皮肤'],
+  ['pendant', '头像挂件'],
   ['emoji_package', '表情包'],
   ['card', '卡片'],
   ['card_bg', '卡片背景'],
   ['thumbup', '点赞动画'],
   ['loading', '加载动画'],
   ['play_icon', '播放装扮'],
-  ['pendant', '头像挂件'],
 ];
 
 /** 图片 URL 白名单：以此类扩展名结尾（可带 query/hash）才视为图片 */
@@ -25,30 +25,43 @@ function isImageUrl(value: unknown): value is string {
  * 展开一个装扮条目为图片列表：
  * - 顶层：properties 里每个图片字段各出一张，标题用字段名（fieldName）
  * - 子项 items[]（如表情包的子表情）：递归展开，标题用子项自己的 name
+ * - pendant 分类：properties.image 视为镂空头像挂件模板（service: 'pendant'），
+ *   用条目自身 name 作卡片标题（dialog 标题与下载文件名由此而来）
  * @param useNameAsLabel true 时用条目 name 作标题（子表情），否则用字段名
+ * @param category 分类 key——pendant 分类下 properties.image 特殊处理
  */
-function itemImages(item: GarbSuitItem, useNameAsLabel = false): GalleryImage[] {
+function itemImages(item: GarbSuitItem, useNameAsLabel = false, category?: string): GalleryImage[] {
   const images: GalleryImage[] = [];
   const props = item.properties ?? {};
   const itemName = item.name?.trim();
 
   for (const [field, value] of Object.entries(props)) {
     if (isImageUrl(value)) {
-      const label = useNameAsLabel && itemName ? itemName : field;
-      images.push({ name: label, img: value, fit: 'contain' });
+      const isPendantImage = category === 'pendant' && field === 'image';
+      const label = isPendantImage && itemName
+        ? itemName
+        : useNameAsLabel && itemName
+          ? itemName
+          : field;
+      images.push({
+        name: label,
+        img: value,
+        fit: 'contain',
+        service: isPendantImage ? 'pendant' : undefined,
+      });
     }
   }
 
   // 递归展开子项（表情包子表情藏在 items[] 里）
   for (const sub of item.items ?? []) {
-    images.push(...itemImages(sub, true));
+    images.push(...itemImages(sub, true, category));
   }
 
   return images;
 }
 
-/** 通过 CORS 代理请求 B 站个性装扮详情 API，返回按分类分区的图片列表 */
-export async function fetchGarbSuit(itemId: string): Promise<GallerySection[]> {
+/** 通过 CORS 代理请求 B 站个性装扮详情 API，返回装扮标题与按分类分区的图片列表 */
+export async function fetchGarbSuit(itemId: string): Promise<{ title: string; sections: GallerySection[] }> {
   const apiUrl = `https://api.bilibili.com/x/garb/v2/mall/suit/detail?item_id=${itemId}`;
   const proxyUrl = `https://p.xrl.im/?url=${encodeURIComponent(apiUrl)}`;
 
@@ -63,7 +76,9 @@ export async function fetchGarbSuit(itemId: string): Promise<GallerySection[]> {
   }
 
   const suitItems = json.data?.suit_items;
-  if (!suitItems) return [];
+  if (!suitItems) return { title: json.data?.name || `个性装扮 (${itemId})`, sections: [] };
+
+  const title = json.data?.name || `个性装扮 (${itemId})`;
 
   // 已知分类按预设顺序输出，未知分类追加在后
   const orderedKeys = [
@@ -75,10 +90,10 @@ export async function fetchGarbSuit(itemId: string): Promise<GallerySection[]> {
   for (const key of orderedKeys) {
     const items = suitItems[key] ?? [];
     const images: GalleryImage[] = [];
-    for (const item of items) images.push(...itemImages(item));
+    for (const item of items) images.push(...itemImages(item, false, key));
     if (images.length === 0) continue;
     const label = CATEGORY_LABELS.find(([k]) => k === key)?.[1] ?? key;
     sections.push({ key, label, images, downloadable: true });
   }
-  return sections;
+  return { title, sections };
 }
